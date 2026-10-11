@@ -101,7 +101,7 @@ pipeline {
       steps {
         withCredentials([
           usernamePassword(
-            credentialsId: 'dockerhub-write',
+            credentialsId: 'cicd',
             usernameVariable: 'DH_USER',
             passwordVariable: 'DH_TOKEN'
           )
