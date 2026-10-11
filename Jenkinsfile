@@ -2,140 +2,65 @@ pipeline {
   agent { label 'ansible && rocky9' }
 
   options {
-    skipDefaultCheckout(true)
     timestamps()
-  }
-
-  triggers {
-    pollSCM('H/2 * * * *')
-  }
-
-  environment {
-    BUILD_PAYMENTS = 'false'
-    BUILD_CATALOG = 'false'
+    disableConcurrentBuilds()
+    skipDefaultCheckout(true)
   }
 
   stages {
-
-    stage('Checkout and detect changed apps') {
+    stage('Checkout and show commits') {
       steps {
-        checkout scm
-
         script {
+          def checkoutInfo = checkout scm
 
-          echo "Current Commit : ${env.GIT_COMMIT}"
-          echo "Previous Commit: ${env.GIT_PREVIOUS_SUCCESSFUL_COMMIT}"
-
-          if (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT?.trim()) {
-
-            def changedFiles = sh(
-              script: """
-                git diff --name-only \
-                ${env.GIT_PREVIOUS_SUCCESSFUL_COMMIT} \
-                HEAD
-              """,
-              returnStdout: true
-            ).trim().tokenize('\n')
-
-            echo "Changed files: ${changedFiles}"
-
-            env.BUILD_PAYMENTS =
-              changedFiles.any { it.startsWith('apps/payments/') } ?
-              'true' : 'false'
-
-            env.BUILD_CATALOG =
-              changedFiles.any { it.startsWith('apps/catalog/') } ?
-              'true' : 'false'
-
-          } else {
-
-            echo "First build detected."
-            echo "Building all applications."
-
-            env.BUILD_PAYMENTS = 'true'
-            env.BUILD_CATALOG = 'true'
+          def currentCommit = checkoutInfo?.get('GIT_COMMIT')?.toString()?.trim()
+          if (!currentCommit) {
+            currentCommit = sh(
+              returnStdout: true,
+              script: 'git rev-parse HEAD'
+            ).trim()
           }
 
-          echo "payments 변경: ${env.BUILD_PAYMENTS}"
-          echo "catalog 변경: ${env.BUILD_CATALOG}"
+          def previousSuccessfulCommit =
+            checkoutInfo?.get('GIT_PREVIOUS_SUCCESSFUL_COMMIT')?.toString()?.trim()
+
+          if (!previousSuccessfulCommit) {
+            previousSuccessfulCommit =
+              env.GIT_PREVIOUS_SUCCESSFUL_COMMIT?.toString()?.trim()
+          }
+
+          env.CI_CURRENT_COMMIT = currentCommit
+          env.CI_PREVIOUS_SUCCESSFUL_COMMIT =
+            previousSuccessfulCommit ?: ''
+
+          echo "BRANCH_NAME=${env.BRANCH_NAME ?: '(not a multibranch build)'}"
+          echo "CI_CURRENT_COMMIT=${env.CI_CURRENT_COMMIT}"
+
+          if (env.CI_PREVIOUS_SUCCESSFUL_COMMIT) {
+            echo "CI_PREVIOUS_SUCCESSFUL_COMMIT=${env.CI_PREVIOUS_SUCCESSFUL_COMMIT}"
+          } else {
+            echo 'CI_PREVIOUS_SUCCESSFUL_COMMIT=(이 브랜치에 이전 성공 빌드가 없음)'
+          }
         }
+
+        sh '''
+          set -eu
+          test "$(git rev-parse HEAD)" = "$CI_CURRENT_COMMIT"
+          git log -1 --format='HEAD=%H%nSUBJECT=%s'
+        '''
       }
     }
 
-    stage('Build and push changed apps') {
-      when {
-        expression {
-          env.BUILD_PAYMENTS == 'true' ||
-          env.BUILD_CATALOG == 'true'
-        }
-      }
-
+    stage('Verify agent') {
       steps {
-
-        withCredentials([
-          usernamePassword(
-            credentialsId: 'dockerhub-write',
-            usernameVariable: 'DH_USER',
-            passwordVariable: 'DH_TOKEN'
-          )
-        ]) {
-
-          sh '''
-            set -eu
-            set +x
-
-            printf '%s' "$DH_TOKEN" | \
-              podman login docker.io \
-              --username "$DH_USER" \
-              --password-stdin
-
-            for APP in payments catalog
-            do
-
-              SHOULD_BUILD="$BUILD_PAYMENTS"
-
-              if [ "$APP" = "catalog" ]; then
-                SHOULD_BUILD="$BUILD_CATALOG"
-              fi
-
-              if [ "$SHOULD_BUILD" != "true" ]; then
-                echo "Skip $APP"
-                continue
-              fi
-
-              APP_DIR="apps/$APP"
-
-              IMAGE_REPO="docker.io/$DH_USER/$APP"
-
-              IMAGE_TAG="build-$BUILD_NUMBER"
-
-              echo "Building $APP"
-
-              test -f "$APP_DIR/Dockerfile"
-
-              podman build \
-                --pull \
-                -f "$APP_DIR/Dockerfile" \
-                -t "$IMAGE_REPO:$IMAGE_TAG" \
-                -t "$IMAGE_REPO:dev" \
-                "$APP_DIR"
-
-              podman push "$IMAGE_REPO:$IMAGE_TAG"
-              podman push "$IMAGE_REPO:dev"
-
-              echo "$APP 업로드 완료"
-            done
-
-            podman logout docker.io
-          '''
-        }
+        sh '''
+          set -eu
+          echo "Running on: $NODE_NAME"
+          hostname
+          java -version
+          ansible --version
+        '''
       }
-    }
-  }
-
-  post {
-    always {
-      sh 'podman logout docker.io >/dev/null 2>&1 || true'
     }
   }
 }
